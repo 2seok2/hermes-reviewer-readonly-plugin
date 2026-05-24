@@ -1,0 +1,6 @@
+name: reviewer-readonly
+version: 1.0.3
+description: "Reviewer-profile guardrail that allows local evidence inspection while blocking mutation-capable tools, non-bare shell commands, and write/helper-capable git options."
+author: "Hermes Agent"
+hooks:
+  - pre_tool_call
