@@ -10,9 +10,10 @@ When the active Hermes profile is named `reviewer`, the plugin blocks mutation-c
 - mutating `process` actions (`kill`, `write`, `submit`, `close`)
 - terminal commands outside a small read-only allowlist
 - shell chaining, redirection, command substitution, process substitution, line breaks, background operators, and environment assignment
+- mutating browser actions and browser escape hatches including `browser_click`, `browser_type`, `browser_console`, `browser_cdp`, and `browser_dialog`
 - mutating or helper-spawning git forms such as `git add`, `git checkout`, `git diff --output`, `--ext-diff`, `--textconv`, and `git grep -O`
 
-It allows normal review reads through `read_file`, `search_files`, `kanban_*` review operations, status/log process reads, and narrowly allowlisted shell diagnostics like `pwd`, `ls`, `cat`, `grep`, and read-only `git status/diff/show/log/rev-parse/ls-files/grep/blame/describe`.
+It allows normal review reads through `read_file`, `search_files`, `kanban_*` review operations, status/log process reads, passive browser inspection (`browser_navigate`, `browser_snapshot`, `browser_get_images`, `browser_vision`), and narrowly allowlisted shell diagnostics like `pwd`, `ls`, `cat`, `grep`, and read-only `git status/diff/show/log/rev-parse/ls-files/grep/blame/describe`.
 
 ## Install
 

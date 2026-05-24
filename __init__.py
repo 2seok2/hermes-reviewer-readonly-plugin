@@ -34,6 +34,14 @@ _BLOCKED_TOOLS = {
     "browser_press",
     "browser_scroll",
     "browser_back",
+    # These browser tools are mutation-capable even without obvious click/type
+    # actions: browser_console can evaluate arbitrary JavaScript in the page
+    # context and browser_cdp exposes raw Chrome DevTools Protocol commands.
+    "browser_console",
+    "browser_cdp",
+    # Confirm/prompt dialogs can commit page actions, so reviewer keeps passive
+    # browser inspection only: navigate/snapshot/get_images/vision remain allowed.
+    "browser_dialog",
 }
 
 # process is part of the terminal toolset.  These actions write to or terminate
