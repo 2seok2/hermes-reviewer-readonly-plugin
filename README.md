@@ -40,19 +40,22 @@ This is a guardrail for trusted review workflows, not a hostile-code sandbox. Ke
 
 ## Optional Kanban Review Bridge Backup
 
-This repository also keeps a backup copy of the local review-required bridge script:
+This repository also keeps backup copies of the local Kanban reviewer ops scripts:
 
 ```text
 ops/review_required_bridge.py
+ops/kanban_watchdog.py
 ```
 
-It is not part of the plugin runtime. It is an ops companion script for installations that want the official Hermes Kanban `review-required:` blocked-task convention to route into a dedicated `reviewer` profile.
+They are not part of the plugin runtime. They are ops companion scripts for installations that want the official Hermes Kanban `review-required:` blocked-task convention to route into a dedicated `reviewer` profile while keeping recoverable blocked work moving without unnecessary human intervention.
 
-Restore it after a fresh clone with:
+Restore them after a fresh clone with:
 
 ```bash
 mkdir -p /Users/yeonseoklee/.hermes/scripts
 cp ops/review_required_bridge.py /Users/yeonseoklee/.hermes/scripts/review_required_bridge.py
-chmod +x /Users/yeonseoklee/.hermes/scripts/review_required_bridge.py
+cp ops/kanban_watchdog.py /Users/yeonseoklee/.hermes/scripts/kanban_watchdog.py
+chmod +x /Users/yeonseoklee/.hermes/scripts/review_required_bridge.py /Users/yeonseoklee/.hermes/scripts/kanban_watchdog.py
 hermes cron create "every 1m" --name "Kanban review-required bridge" --deliver local --script review_required_bridge.py --no-agent
+hermes cron create "every 5m" --name "Kanban watchdog — no silent blocked work" --deliver telegram:-5133663775 --script kanban_watchdog.py --no-agent
 ```
