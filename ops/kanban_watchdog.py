@@ -34,6 +34,15 @@ HUMAN_REQUIRED_RE = re.compile(
     re.IGNORECASE,
 )
 
+REVIEW_COMPLETION_HUMAN_REQUIRED_RE = re.compile(
+    r"token|credential|secret|api key|password|2fa|oauth|login|paywall|"
+    r"missing.*(key|token|credential|secret|password|env)|"
+    r"explicit approval|approval required|human decision|user decision|destructive|irreversible|"
+    r"production approval|permission grant|"
+    r"토큰|자격|비밀|로그인|권한 부여|결제|유료|인증키|환경변수|명시적 승인|사용자 결정|사람 판단",
+    re.IGNORECASE,
+)
+
 RECOVERABLE_RE = re.compile(
     r"iteration budget|protocol violation|rebase|merge conflict|conflict|timeout|timed out|"
     r"crashed|stale|validation|test failure|failed after|exhausted|"
@@ -173,8 +182,93 @@ def active_review_bridge_exists(board: str, task_id: str) -> bool:
             pass
 
 
+def latest_review_bridge_info(board: str, task_id: str) -> dict[str, str] | None:
+    db = board_db_path(board)
+    if not db.exists():
+        return None
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(db)
+        conn.row_factory = sqlite3.Row
+        task_row = conn.execute(
+            """
+            SELECT id, status, title
+            FROM tasks
+            WHERE created_by = 'review-required-bridge'
+              AND body LIKE ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (f"%{task_id}%",),
+        ).fetchone()
+        if not task_row:
+            return None
+        completed_row = conn.execute(
+            """
+            SELECT payload
+            FROM task_events
+            WHERE task_id = ? AND kind = 'completed'
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (str(task_row["id"]),),
+        ).fetchone()
+        completed_summary = ""
+        if completed_row:
+            try:
+                payload = json.loads(completed_row[0] or "{}")
+            except Exception:
+                payload = {}
+            completed_summary = str(payload.get("summary") or "")
+        return {
+            "task_id": str(task_row["id"]),
+            "status": str(task_row["status"] or ""),
+            "title": str(task_row["title"] or ""),
+            "completed_summary": completed_summary,
+        }
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def bridge_action_line(board: str, bridge_task_id: str, task_id: str) -> str:
+    return f"reviewer bridge {bridge_task_id} for {board}/{task_id}"
+
+
+def review_bridge_context(bridge_info: dict[str, str] | None) -> str:
+    if not bridge_info:
+        return ""
+    return "\n".join(
+        part
+        for part in [bridge_info.get("title", ""), bridge_info.get("completed_summary", "")]
+        if part
+    ).strip()
+
+
+def review_bridge_outcome_label(bridge_info: dict[str, str] | None) -> str:
+    text = review_bridge_context(bridge_info).lower()
+    if not text:
+        return "review complete"
+    if "did not approve" in text or "approved=false" in text or '"approved": false' in text:
+        return "changes requested"
+    if "approved=true" in text or '"approved": true' in text:
+        return "approved"
+    if "approve" in text and "did not approve" not in text:
+        return "approved"
+    return "review complete"
+
+
 def is_human_required(text: str) -> bool:
     return bool(HUMAN_REQUIRED_RE.search(text or ""))
+
+
+def is_human_required_review_completion(text: str) -> bool:
+    return bool(REVIEW_COMPLETION_HUMAN_REQUIRED_RE.search(text or ""))
 
 
 def is_recoverable(text: str) -> bool:
@@ -246,11 +340,13 @@ def main() -> int:
     warning_reports: list[str] = []
     complete_reports: list[str] = []
     actions: list[str] = []
+    raw_bridge_actions: list[str] = []
+    suppressed_bridge_actions: set[str] = set()
 
     if REVIEW_BRIDGE_SCRIPT.exists():
         bridge = run([str(REVIEW_BRIDGE_SCRIPT)])
         if bridge.returncode == 0 and bridge.stdout.strip():
-            actions.extend(line for line in bridge.stdout.strip().splitlines() if line.strip())
+            raw_bridge_actions.extend(line for line in bridge.stdout.strip().splitlines() if line.strip())
         elif bridge.returncode != 0:
             warning_reports.append(
                 "- review-required bridge 실행 실패: "
@@ -326,6 +422,60 @@ def main() -> int:
                 blocked_text = block_context(block_reason, summary)
                 review_required = is_review_required(block_reason) or is_review_required(summary)
                 if review_required:
+                    bridge_info = latest_review_bridge_info(board, tid)
+                    if bridge_info and bridge_info.get("status") == "done":
+                        bridge_id = bridge_info.get("task_id", "")
+                        if bridge_id:
+                            suppressed_bridge_actions.add(bridge_action_line(board, bridge_id, tid))
+                        review_text = review_bridge_context(bridge_info)
+                        if is_human_required_review_completion(review_text):
+                            if now - int(last or 0) >= REMINDER_SECONDS:
+                                intervention_reports.append(
+                                    task_lines(board, task)
+                                    + "\n  reviewer bridge 완료 후에도 human-gated 상태로 판단되어 자동 재개하지 않음: "
+                                    + (review_text or bridge_id or "review outcome requires human intervention")
+                                )
+                                seen[key] = now
+                            continue
+
+                        resume_key = f"{board}:{tid}:bridge-resume:{bridge_id}"
+                        if not seen.get(resume_key):
+                            run([
+                                "hermes", "kanban", "--board", board, "comment", "--author", "kanban-watchdog", tid,
+                                (
+                                    f"Auto-recovery: reviewer bridge {bridge_id} completed; "
+                                    "unblocking and redispatching the original task so the assignee can continue from the review outcome."
+                                ),
+                            ])
+                            unblocked = run(["hermes", "kanban", "--board", board, "unblock", tid])
+                            seen[resume_key] = now
+                            seen[key] = now
+                            if unblocked.returncode == 0:
+                                seen[f"{board}:{tid}:running"] = now
+                                actions.append(
+                                    f"[{board}] resumed {tid} after completed reviewer bridge {bridge_id} ({review_bridge_outcome_label(bridge_info)})"
+                                )
+                                redispatch = run(["hermes", "kanban", "--board", board, "dispatch", "--max", "1", "--json"])
+                                if redispatch.returncode == 0:
+                                    try:
+                                        rd = json.loads(redispatch.stdout or "{}")
+                                        spawned = rd.get("spawned") or []
+                                        if spawned:
+                                            actions.append(
+                                                f"[{board}] review follow-up dispatch spawned: "
+                                                + ", ".join(x.get("task_id", "?") for x in spawned)
+                                            )
+                                    except Exception:
+                                        pass
+                            else:
+                                warning_reports.append(
+                                    task_lines(board, task)
+                                    + f"\n  reviewer bridge 완료 후 자동 unblock 실패: {unblocked.stderr.strip() or unblocked.stdout.strip()}"
+                                )
+                        else:
+                            seen[key] = now
+                        continue
+
                     if active_review_bridge_exists(board, tid):
                         seen[key] = now
                         continue
@@ -420,6 +570,11 @@ def main() -> int:
                 if age >= STALE_RUNNING_SECONDS and now - int(last or 0) >= REMINDER_SECONDS:
                     warning_reports.append(task_lines(board, task) + f"\n  경과: {age//60}분 running — heartbeat/log 확인 필요")
                     seen[key] = now
+
+    for action in raw_bridge_actions:
+        if action in suppressed_bridge_actions:
+            continue
+        actions.append(action)
 
     state["seen"] = seen
     state["last_run_at"] = now

@@ -47,7 +47,7 @@ ops/review_required_bridge.py
 ops/kanban_watchdog.py
 ```
 
-They are not part of the plugin runtime. They are ops companion scripts for installations that want the official Hermes Kanban `review-required:` blocked-task convention to route into a dedicated `reviewer` profile while keeping recoverable blocked work moving without unnecessary human intervention.
+They are not part of the plugin runtime. They are ops companion scripts for installations that want the official Hermes Kanban `review-required:` blocked-task convention to route into a dedicated `reviewer` profile while keeping recoverable blocked work moving without unnecessary human intervention. In particular, the watchdog can reconcile a completed reviewer bridge back into the original source task by auto-unblocking and redispatching it when the review outcome is a normal approve/request-changes result rather than a human-gated approval/credential decision.
 
 Restore them after a fresh clone with:
 
