@@ -37,3 +37,22 @@ Then start a fresh reviewer session or restart the relevant gateway/worker proce
 ## Notes
 
 This is a guardrail for trusted review workflows, not a hostile-code sandbox. Keep reviewer prompts read-only and use it alongside review-gated Kanban tasks that provide local `review_artifacts/<task_id>/review_packet.md` and `review.diff` evidence.
+
+## Optional Kanban Review Bridge Backup
+
+This repository also keeps a backup copy of the local review-required bridge script:
+
+```text
+ops/review_required_bridge.py
+```
+
+It is not part of the plugin runtime. It is an ops companion script for installations that want the official Hermes Kanban `review-required:` blocked-task convention to route into a dedicated `reviewer` profile.
+
+Restore it after a fresh clone with:
+
+```bash
+mkdir -p /Users/yeonseoklee/.hermes/scripts
+cp ops/review_required_bridge.py /Users/yeonseoklee/.hermes/scripts/review_required_bridge.py
+chmod +x /Users/yeonseoklee/.hermes/scripts/review_required_bridge.py
+hermes cron create "every 1m" --name "Kanban review-required bridge" --deliver local --script review_required_bridge.py --no-agent
+```
