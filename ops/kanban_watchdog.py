@@ -149,8 +149,24 @@ def latest_block_reason(board: str, task_id: str) -> str:
     return str(payload.get("reason") or "")
 
 
+def _normalize_report_text(text: str) -> str:
+    """Normalize report text enough to suppress duplicate reason/summary lines."""
+    return re.sub(r"\s+", " ", (text or "").strip())
+
+
 def block_context(block_reason: str, summary: str) -> str:
-    return "\n".join(part for part in [block_reason, summary] if part).strip()
+    parts: list[str] = []
+    seen_normalized: set[str] = set()
+    for part in (block_reason, summary):
+        cleaned = (part or "").strip()
+        if not cleaned:
+            continue
+        normalized = _normalize_report_text(cleaned)
+        if normalized in seen_normalized:
+            continue
+        seen_normalized.add(normalized)
+        parts.append(cleaned)
+    return "\n".join(parts).strip()
 
 
 def is_review_required(text: str) -> bool:
