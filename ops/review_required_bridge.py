@@ -45,6 +45,17 @@ def board_dbs() -> list[tuple[str, Path]]:
     return dbs
 
 
+def has_required_schema(conn: sqlite3.Connection) -> bool:
+    rows = conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name IN ('tasks', 'task_events')
+        """
+    ).fetchall()
+    return {str(row[0]) for row in rows} == {'tasks', 'task_events'}
+
+
 def latest_block_reason(conn: sqlite3.Connection, task_id: str) -> tuple[int, str] | None:
     row = conn.execute(
         """
@@ -72,6 +83,8 @@ def find_blocked_review_tasks(board: str, db: Path) -> list[BlockedReviewTask]:
     conn = sqlite3.connect(db)
     try:
         conn.row_factory = sqlite3.Row
+        if not has_required_schema(conn):
+            return out
         rows = conn.execute(
             """
             SELECT id, title, assignee, body
