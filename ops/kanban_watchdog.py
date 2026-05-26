@@ -22,6 +22,8 @@ STATE_PATH = ORG_ROOT / "ops" / "kanban-watchdog-state.json"
 CHAT_ID = "-5133663775"
 REMINDER_SECONDS = 30 * 60
 STALE_RUNNING_SECONDS = 30 * 60
+RECOVERY_STALE_RUNNING_SECONDS = 15 * 60
+RECOVERY_REMINDER_SECONDS = 15 * 60
 DISPATCH_MAX: str | None = "10"
 AUTO_UNBLOCK_LIMIT = 1
 
@@ -296,6 +298,16 @@ def recovery_assignee(task: dict[str, Any]) -> str:
     return "coder"
 
 
+def extract_recovery_origin_task_id(task: dict[str, Any]) -> str:
+    title = str(task.get("title") or "")
+    body = str(task.get("body") or "")
+    for text in (title, body):
+        match = re.search(r"\bt_[0-9a-f]{8}\b", text)
+        if match:
+            return match.group(0)
+    return ""
+
+
 def create_recovery_task(board: str, task: dict[str, Any], summary: str, attempt: int) -> str | None:
     tid = task.get("id", "")
     title = f"RECOVERY: keep {tid} moving"
@@ -318,6 +330,48 @@ def create_recovery_task(board: str, task: dict[str, Any], summary: str, attempt
         "--workspace", "scratch",
         "--idempotency-key", f"watchdog-recovery-{board}-{tid}-{attempt}",
         "--max-runtime", "45m",
+        "--created-by", "kanban-watchdog",
+        "--body", body,
+        "--json",
+    ])
+    if proc.returncode != 0:
+        return None
+    try:
+        data = json.loads(proc.stdout or "{}")
+        return data.get("id") or data.get("task_id")
+    except Exception:
+        m = re.search(r"t_[0-9a-f]+", proc.stdout)
+        return m.group(0) if m else None
+
+
+def create_decomposition_task(
+    board: str,
+    recovery_task: dict[str, Any],
+    source_task_id: str,
+    running_age_minutes: int,
+) -> str | None:
+    recovery_task_id = str(recovery_task.get("id") or "")
+    title = f"DECOMPOSE: recover {source_task_id} after stalled recovery"
+    body = (
+        f"Watchdog escalation for stalled recovery task {recovery_task_id}.\n"
+        f"Board: {board}\n"
+        f"Original source task: {source_task_id}\n"
+        f"Recovery task age: {running_age_minutes} minutes\n\n"
+        "Goal: do the decomposition that the stalled recovery task did not finish, and stop silent long-running loops.\n"
+        "Required steps:\n"
+        f"1. Inspect both `{source_task_id}` and `{recovery_task_id}` with show/runs/log/context plus any existing worktree diff/artifacts.\n"
+        "2. Preserve any in-progress implementation evidence; do NOT restart broad QA from scratch if validated work already exists.\n"
+        "3. If the original task can be finished with a narrow handoff, create/route the minimum follow-up (for example review-handoff-only or deploy-only).\n"
+        "4. If the scope is still too large, create smaller Kanban tasks with real dependencies instead of another monolithic recovery loop.\n"
+        "5. Comment on the original task with the decomposition/recovery plan and unblock or reassign follow-up work as needed.\n"
+        "Keep the result concise and execution-oriented."
+    )
+    proc = run([
+        "hermes", "kanban", "--board", board, "create", title,
+        "--assignee", "default",
+        "--workspace", "scratch",
+        "--idempotency-key", f"watchdog-decompose-{board}-{source_task_id}-{recovery_task_id}",
+        "--max-runtime", "30m",
         "--created-by", "kanban-watchdog",
         "--body", body,
         "--json",
@@ -567,6 +621,40 @@ def main() -> int:
             elif status == "running":
                 started = int(task.get("started_at") or now)
                 age = now - started
+                is_recovery_task = str(task.get("title") or "").startswith("RECOVERY:")
+                if is_recovery_task and age >= RECOVERY_STALE_RUNNING_SECONDS:
+                    source_task_id = extract_recovery_origin_task_id(task)
+                    decompose_key = f"{board}:{tid}:decomposition_task"
+                    decompose_id = str(seen.get(decompose_key) or "")
+                    age_minutes = age // 60
+                    if source_task_id and not decompose_id:
+                        created = create_decomposition_task(board, task, source_task_id, age_minutes)
+                        seen[decompose_key] = created or "failed"
+                        if created:
+                            actions.append(
+                                f"[{board}] created decomposition task {created} after stalled recovery {tid} for {source_task_id}"
+                            )
+                            run([
+                                "hermes", "kanban", "--board", board, "notify-subscribe", created,
+                                "--platform", "telegram", "--chat-id", CHAT_ID, "--notifier-profile", "default",
+                            ])
+                            run(["hermes", "kanban", "--board", board, "dispatch", "--max", "1", "--json"])
+                            decompose_id = created
+                        else:
+                            intervention_reports.append(
+                                task_lines(board, task)
+                                + f"\n  경과: {age_minutes}분 running — 자동 decomposition task 생성 실패, 수동 확인 필요"
+                            )
+                            seen[key] = now
+                    if now - int(last or 0) >= RECOVERY_REMINDER_SECONDS:
+                        suffix = f"\n  자동 decomposition task: {decompose_id}" if decompose_id and decompose_id != "failed" else ""
+                        warning_reports.append(
+                            task_lines(board, task)
+                            + f"\n  경과: {age_minutes}분 running — RECOVERY 태스크가 오래 지속되어 자동 decomposition을 트리거함."
+                            + suffix
+                        )
+                        seen[key] = now
+                    continue
                 if age >= STALE_RUNNING_SECONDS and now - int(last or 0) >= REMINDER_SECONDS:
                     warning_reports.append(task_lines(board, task) + f"\n  경과: {age//60}분 running — heartbeat/log 확인 필요")
                     seen[key] = now
